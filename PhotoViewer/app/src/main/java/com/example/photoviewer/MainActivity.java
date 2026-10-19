@@ -151,6 +151,8 @@ public class MainActivity extends AppCompatActivity {
     }
 
     private class CloadImage extends AsyncTask<String, Integer, List<Bitmap>> {
+        private final List<String> titleList = new ArrayList<>(); // 사진과 같은 순서로 제목을 모음
+
         @Override
         protected List<Bitmap> doInBackground(String... urls) {
             List<Bitmap> bitmapList = new ArrayList<>();
@@ -186,6 +188,7 @@ public class MainActivity extends AppCompatActivity {
                             InputStream imgStream = conn.getInputStream();
                             Bitmap imageBitmap = decodeSampledBitmap(readAllBytes(imgStream), 1080);
                             bitmapList.add(imageBitmap); // 이미지 리스트에 추가
+                            titleList.add(post_json.getString("title"));
                             imgStream.close();
                         }
                     }
@@ -203,7 +206,7 @@ public class MainActivity extends AppCompatActivity {
             } else {
                 textView.setText("이미지 로드 성공!");
                 RecyclerView recyclerView = findViewById(R.id.recyclerView);
-                ImageAdapter adapter = new ImageAdapter(images);
+                ImageAdapter adapter = new ImageAdapter(images, titleList);
                 recyclerView.setLayoutManager(new LinearLayoutManager(MainActivity.this));
                 recyclerView.setAdapter(adapter);
             }
