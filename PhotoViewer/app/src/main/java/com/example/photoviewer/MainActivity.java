@@ -1,17 +1,25 @@
 package com.example.photoviewer;
 
+import android.database.Cursor;
 import android.graphics.Bitmap;
 import android.graphics.BitmapFactory;
 import android.graphics.Matrix;
 import android.media.ExifInterface;
+import android.net.Uri;
 import android.os.AsyncTask;
 import android.os.Bundle;
+import android.provider.OpenableColumns;
 import android.view.View;
+import android.widget.EditText;
 import android.widget.ImageView;
 import android.widget.TextView;
 import android.widget.Toast;
 
 import androidx.activity.EdgeToEdge;
+import androidx.activity.result.ActivityResultLauncher;
+import androidx.activity.result.PickVisualMediaRequest;
+import androidx.activity.result.contract.ActivityResultContracts;
+import androidx.appcompat.app.AlertDialog;
 import androidx.appcompat.app.AppCompatActivity;
 import androidx.core.graphics.Insets;
 import androidx.core.view.ViewCompat;
@@ -51,6 +59,11 @@ public class MainActivity extends AppCompatActivity {
     CloadImage taskDownload;
     PutPost taskUpload;
 
+    // 업로드 대화상자에서 고른 사진
+    ActivityResultLauncher<PickVisualMediaRequest> pickImage;
+    Uri selectedImageUri;
+    ImageView dialogPreview;
+
     @Override
     protected void onCreate(Bundle savedInstanceState) {
         super.onCreate(savedInstanceState);
@@ -63,25 +76,78 @@ public class MainActivity extends AppCompatActivity {
         });
         //imgView = (ImageView) findViewById(R.id.imgView);
         textView = (TextView) findViewById(R.id.textView);
+
+        // 안드로이드 사진 선택기(Photo Picker): 저장공간 권한 없이 사용자가 고른 사진만 읽을 수 있음
+        pickImage = registerForActivityResult(new ActivityResultContracts.PickVisualMedia(), uri -> {
+            if (uri == null || dialogPreview == null) {
+                return;
+            }
+            try {
+                dialogPreview.setImageBitmap(decodeSampledBitmap(readUriBytes(uri), 1080));
+                selectedImageUri = uri;
+            } catch (IOException e) {
+                Toast.makeText(getApplicationContext(), "사진을 읽지 못했습니다", Toast.LENGTH_SHORT).show();
+            }
+        });
     }
 
     public void onClickDownload(View v) {
+        startDownload();
+        Toast.makeText(getApplicationContext(), "Download", Toast.LENGTH_LONG).show();
+    }
+
+    private void startDownload() {
         if (taskDownload != null && taskDownload.getStatus() == AsyncTask.Status.RUNNING) {
             taskDownload.cancel(true);
         }
         taskDownload = new CloadImage();
         taskDownload.execute(site_url + "/api_root/Post/");
-        Toast.makeText(getApplicationContext(), "Download", Toast.LENGTH_LONG).show();
     }
 
+    // Upload (Post에 따른 UI 제공): Post의 image, title, text를 입력받는 대화상자
     public void onClickUpload(View v) {
         if (taskUpload != null && taskUpload.getStatus() == AsyncTask.Status.RUNNING) {
             Toast.makeText(getApplicationContext(), "업로드 중입니다", Toast.LENGTH_SHORT).show();
             return;
         }
-        taskUpload = new PutPost();
-        taskUpload.execute(site_url + "/api_root/Post/");
-        Toast.makeText(getApplicationContext(), "Upload", Toast.LENGTH_LONG).show();
+        View view = getLayoutInflater().inflate(R.layout.dialog_upload, null);
+        EditText editTitle = view.findViewById(R.id.edit_title);
+        EditText editText = view.findViewById(R.id.edit_text);
+        dialogPreview = view.findViewById(R.id.image_preview);
+        selectedImageUri = null;
+        view.findViewById(R.id.btn_pick).setOnClickListener(b -> pickImage.launch(
+                new PickVisualMediaRequest.Builder()
+                        .setMediaType(ActivityResultContracts.PickVisualMedia.ImageOnly.INSTANCE)
+                        .build()));
+
+        AlertDialog dialog = new AlertDialog.Builder(this)
+                .setTitle("새로운 이미지 게시")
+                .setView(view)
+                .setPositiveButton("게시", null)
+                .setNegativeButton("취소", null)
+                .create();
+        // 입력이 비어 있으면 대화상자를 닫지 않도록 "게시" 버튼 동작을 직접 지정
+        dialog.setOnShowListener(d -> dialog.getButton(AlertDialog.BUTTON_POSITIVE).setOnClickListener(b -> {
+            String title = editTitle.getText().toString().trim();
+            String text = editText.getText().toString().trim();
+            if (selectedImageUri == null || title.isEmpty() || text.isEmpty()) {
+                Toast.makeText(getApplicationContext(), "사진, 제목, 내용을 모두 입력하세요", Toast.LENGTH_SHORT).show();
+                return;
+            }
+            try {
+                byte[] image = readUriBytes(selectedImageUri);
+                String fileName = queryFileName(selectedImageUri);
+                String contentType = getContentResolver().getType(selectedImageUri);
+                taskUpload = new PutPost(title, text, image, fileName,
+                        contentType != null ? contentType : "image/jpeg");
+                taskUpload.execute(site_url + "/api_root/Post/");
+                textView.setText("업로드 중...");
+                dialog.dismiss();
+            } catch (IOException e) {
+                Toast.makeText(getApplicationContext(), "사진을 읽지 못했습니다", Toast.LENGTH_SHORT).show();
+            }
+        }));
+        dialog.show();
     }
 
     private class CloadImage extends AsyncTask<String, Integer, List<Bitmap>> {
@@ -95,7 +161,7 @@ public class MainActivity extends AppCompatActivity {
                 conn.setRequestProperty("Authorization", "Token " + token);
                 conn.setRequestMethod("GET");
                 conn.setConnectTimeout(3000);
-                conn.setReadTimeout(3000);
+                conn.setReadTimeout(10000); // 클라우드 서버는 한동안 요청이 없으면 첫 응답이 3초를 넘길 때가 있음
 
                 int responseCode = conn.getResponseCode();
                 if (responseCode == HttpURLConnection.HTTP_OK) {
@@ -144,14 +210,26 @@ public class MainActivity extends AppCompatActivity {
         }
     }
 
-    // Upload (Hard coding): 제목, 본문, 이미지를 코드에 고정해 두고 multipart/form-data로 POST
+    // 대화상자에서 입력받은 제목, 내용, 사진을 multipart/form-data로 POST
     private class PutPost extends AsyncTask<String, Void, Integer> {
+        private final String title;
+        private final String text;
+        private final byte[] image;
+        private final String fileName;
+        private final String contentType;
+
+        PutPost(String title, String text, byte[] image, String fileName, String contentType) {
+            this.title = title;
+            this.text = text;
+            this.image = image;
+            this.fileName = fileName;
+            this.contentType = contentType;
+        }
+
         @Override
         protected Integer doInBackground(String... urls) {
             String boundary = "----PhotoViewerBoundary" + System.currentTimeMillis();
-            Date now = new Date();
-            String date = new SimpleDateFormat("yyyy-MM-dd'T'HH:mm:ssXXX", Locale.US).format(now);
-            String time = new SimpleDateFormat("HH:mm:ss", Locale.US).format(now);
+            String date = new SimpleDateFormat("yyyy-MM-dd'T'HH:mm:ssXXX", Locale.US).format(new Date());
 
             try {
                 URL url = new URL(urls[0]);
@@ -166,12 +244,11 @@ public class MainActivity extends AppCompatActivity {
 
                 DataOutputStream out = new DataOutputStream(conn.getOutputStream());
                 writeTextPart(out, boundary, "author", "1");
-                writeTextPart(out, boundary, "title", "Android 업로드 테스트 " + time);
-                writeTextPart(out, boundary, "text", "PhotoViewer 앱에서 하드코딩으로 업로드한 게시물입니다.");
+                writeTextPart(out, boundary, "title", title);
+                writeTextPart(out, boundary, "text", text);
                 writeTextPart(out, boundary, "created_date", date);
                 writeTextPart(out, boundary, "published_date", date);
-                writeFilePart(out, boundary, "image", "upload_sample.jpg", "image/jpeg",
-                        readRawResource(R.raw.upload_sample));
+                writeFilePart(out, boundary, "image", fileName, contentType, image);
                 out.writeBytes("--" + boundary + "--\r\n");
                 out.flush();
                 out.close();
@@ -188,8 +265,9 @@ public class MainActivity extends AppCompatActivity {
         @Override
         protected void onPostExecute(Integer responseCode) {
             if (responseCode == HttpURLConnection.HTTP_CREATED) {
-                textView.setText("업로드 성공! (HTTP 201) 동기화를 눌러 확인하세요.");
-                Toast.makeText(getApplicationContext(), "업로드 성공", Toast.LENGTH_LONG).show();
+                textView.setText("업로드 성공! (HTTP 201)");
+                Toast.makeText(getApplicationContext(), "업로드 성공 (HTTP 201)", Toast.LENGTH_LONG).show();
+                startDownload(); // 새 글이 보이도록 목록을 다시 불러옴
             } else {
                 textView.setText("업로드 실패 (응답 코드: " + responseCode + ")");
                 Toast.makeText(getApplicationContext(), "업로드 실패", Toast.LENGTH_LONG).show();
@@ -216,10 +294,23 @@ public class MainActivity extends AppCompatActivity {
         out.writeBytes("\r\n");
     }
 
-    private byte[] readRawResource(int resId) throws IOException {
-        try (InputStream is = getResources().openRawResource(resId)) {
+    private byte[] readUriBytes(Uri uri) throws IOException {
+        try (InputStream is = getContentResolver().openInputStream(uri)) {
+            if (is == null) {
+                throw new IOException("열 수 없는 사진: " + uri);
+            }
             return readAllBytes(is);
         }
+    }
+
+    private String queryFileName(Uri uri) {
+        try (Cursor cursor = getContentResolver().query(uri, new String[]{OpenableColumns.DISPLAY_NAME},
+                null, null, null)) {
+            if (cursor != null && cursor.moveToFirst()) {
+                return cursor.getString(0);
+            }
+        }
+        return "upload.jpg";
     }
 
     private static byte[] readAllBytes(InputStream is) throws IOException {
