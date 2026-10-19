@@ -42,7 +42,8 @@ import java.util.Locale;
 public class MainActivity extends AppCompatActivity {
     ImageView imgView;
     TextView textView;
-    String site_url = "http://10.0.2.2:8000";
+    //String site_url = "http://10.0.2.2:8000";                // 로컬 Django 서버 (에뮬레이터에서 PC 접속)
+    String site_url = "https://mathdong01.pythonanywhere.com";  // PythonAnywhere 클라우드 서버
     String token = "06aa732c414805ecd1ccd35d9edea355e923bf0e";
     JSONObject post_json;
     String imageUrl = null;
